@@ -67,17 +67,23 @@ if False:
     fix_gpu()
 
 # Global variables
-ID = 31 # identifier for this simulation - use 1000 examples (unbalanced) instead of 648 - only 3 parameters
+ID = 51 # identifier for this simulation - use USE_CLASS_WEIGHT=True and 3000 examples (unbalanced) instead of 648 - only 3 parameters
+USE_CLASS_WEIGHT = False # class weight for unbalanced sets
 EPOCHS = 100 # maximum number of epochs
+NUM_OPTUNA_TRIALS = 150 
 #IMAGESIZE = (240, 240)      # Define the input shape of the images
 INPUTSHAPE = (1280,) # (240, 240, 3)  # NN input
 #BEST_MODEL = None # Best NN model 
 #CURRENT_MODEL = None
-VERBOSITY_LEVEL = 0 #use 1 to see the progress bar when training and testing
+VERBOSITY_LEVEL = 1 #use 1 to see the progress bar when training and testing
 
 #folder with 3 files storing pre-computed backend outputs
 #INPUT_DIR = '../backend_output/effnet_N1000/' 
-INPUT_DIR = '../backend_output/efficientnet_v2_imagenet21k_ft1k_xl_N1000/'
+#INPUT_DIR = '../backend_output/efficientnet_v2_imagenet21k_ft1k_xl_N1000/'
+#INPUT_DIR = '../backend_output/efficientnet_v2_imagenet21k_ft1k_xl_N3000/'
+#INPUT_DIR = '../backend_output/aug_0_1_train-1-C1/efficientnet_v2_imagenet1k_b1_N10000/'
+# INPUT_DIR = '../backend_output/aug_0_1_train-1-C3/efficientnet_v2_imagenet21k_ft1k_xl_N10000/'
+INPUT_DIR = '../backend_output/aug_0_1_train-1-C3/efficientnet_v2_imagenet1k_b1_N3000_id_1/'
 
 #Important: output folder
 OUTPUT_DIR = '../outputs/optuna_outputs/id_' + str(ID) + '/' #os.path.join('../outputs/unbalanced/id_' + str(simulation_ID), base_name)        
@@ -85,15 +91,22 @@ if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
     print("Created folder ", OUTPUT_DIR)
 
-# not working! CURRENT_MODEL is None
-def save_best_model_callback(study, trial):
-    global BEST_MODEL, OUTPUT_DIR
-    best_model_name = "optuna_best_model" # do not use .h5 extension to save in modern format
-    best_model_name = os.path.join(OUTPUT_DIR, best_model_name)
-    if study.best_trial == trial:
-        #BEST_MODEL = CURRENT_MODEL
-        print("Saving best model ", best_model_name, "...")
-        #BEST_MODEL.save(best_model_name)
+
+def calculate_class_weights(y):
+        values, counts = np.unique(np.array(y),return_counts=True)
+        print("Finding weights for each class:")
+        print('values=',values)
+        print('counts=',counts)
+
+        neg= counts[0]
+        pos= counts[1]
+        total = neg+pos
+
+        # Scaling by total/2 helps keep the loss to a similar magnitude.
+        # The sum of the weights of all examples stays the same.
+        weight_for_0 = (1 / neg) * (total / 2.0)
+        weight_for_1 = (1 / pos) * (total / 2.0)
+        return weight_for_0, weight_for_1
 
 def read_three_datasets():
     file_name = os.path.join(INPUT_DIR, "validation.pickle")
@@ -130,23 +143,25 @@ def objective(trial): # uses effnet
     #model_url = 'https://tfhub.dev/google/imagenet/efficientnet_v2_imagenet1k_b1/feature_vector/2'
     #extractor = hub.KerasLayer(model_url, input_shape=INPUTSHAPE, trainable=trainable)
     
-    #Optuna parameters
-    batch_size = 10 #trial.suggest_int("batch_size", 1, 15) 
-    num_dense_layers = 1 #trial.suggest_int("num_dense_layers", 1, 2) # number of layers
+    ############ Optuna parameters
+
+    ############ Optuna parameters
+    batch_size = trial.suggest_int("batch_size", 1, 15) 
+    num_dense_layers = trial.suggest_int("num_dense_layers", 1, 4) # number of layers
     num_neurons_per_layer = np.zeros(num_dense_layers, dtype=np.int64)
-    num_neurons_per_layer[0] = trial.suggest_int("neurons_L1", 50, 300)
+    num_neurons_per_layer[0] = trial.suggest_int("neurons_L1", 10, 3000)
     for i in range(num_dense_layers-1):
-        # force number of neurons to not increase
+        # force number of neurons to not increase in consecutive layers
         num_neurons_per_layer[i+1] = trial.suggest_int("neurons_L{}".format(i+2), num_neurons_per_layer[i]//4, num_neurons_per_layer[i])
-    dropout_rate = trial.suggest_float("dropout", 0.5, 0.99)
-    use_batch_normalization=False #trial.suggest_categorical("batch_nor", [True, False])
-    use_regularizers= False #trial.suggest_categorical("regul", [True, False])
+    dropout_rate = trial.suggest_float("dropout", 0.2, 0.7)
+    use_batch_normalization= trial.suggest_categorical("batch_nor", [True, False])
+    use_regularizers= trial.suggest_categorical("regul", [True, False])
     if use_regularizers:
         l1_weight = trial.suggest_categorical("l1_weight", [0, 1e-5, 1e-4, 1e-3, 1e-2])
         l2_weight = trial.suggest_categorical("l2_weight", [0, 1e-5, 1e-4, 1e-3, 1e-2])
     activation= trial.suggest_categorical("activation", ["elu", "swish"])
     # We compile our model with a sampled learning rate.
-    learning_rate = trial.suggest_float("lea_rate", 1e-5, 1e-1, log=True)
+    learning_rate = trial.suggest_float("lea_rate", 1e-5, 1e-2, log=True)
 
     print("num_neurons_per_layer =", num_neurons_per_layer)
     #first layer
@@ -214,11 +229,11 @@ def objective(trial): # uses effnet
 
     # Define the metric for callbacks and Optuna
     if True:
-        metric_to_monitor = ('val_accuracy',) #trial.suggest_categorical("metric_to_monitor", ['val_accuracy', 'val_auc']),
+        metric_to_monitor = 'val_accuracy' #trial.suggest_categorical("metric_to_monitor", ['val_accuracy', 'val_auc'])
     else:
-        metric_to_monitor = ('val_auc',)
+        metric_to_monitor = 'val_auc'
     metric_mode = 'max'
-    early_stopping = EarlyStopping(monitor=metric_to_monitor[0], patience=3, mode=metric_mode)
+    early_stopping = EarlyStopping(monitor=metric_to_monitor, patience=3, mode=metric_mode)
     #early_stopping = EarlyStopping(monitor='val_auc', patience=5)
 
     #look at https://www.tensorflow.org/guide/keras/serialization_and_saving
@@ -226,9 +241,9 @@ def objective(trial): # uses effnet
     #best_model_name = 'best_model_' + base_name + '.h5'
     best_model_name = 'optuna_best_model_' + str(trial.number)
     best_model_name = os.path.join(OUTPUT_DIR, best_model_name)
-    best_model_save = ModelCheckpoint(best_model_name, save_best_only=True, monitor=metric_to_monitor[0], mode=metric_mode)
+    best_model_save = ModelCheckpoint(best_model_name, save_best_only=True, monitor=metric_to_monitor, mode=metric_mode)
 
-    reduce_lr_loss = ReduceLROnPlateau(monitor=metric_to_monitor[0], factor=0.5, patience=3, verbose=VERBOSITY_LEVEL, min_delta=1e-4, mode=metric_mode)
+    reduce_lr_loss = ReduceLROnPlateau(monitor=metric_to_monitor, factor=0.5, patience=3, verbose=VERBOSITY_LEVEL, min_delta=1e-4, mode=metric_mode)
     # Define Tensorboard as a Keras callback
     tensorboard = TensorBoard(
     log_dir= '.\logoptuna',
@@ -255,6 +270,13 @@ def objective(trial): # uses effnet
 
     
     num_train = len(train_data[1])
+
+    class_weight = None # initialize
+    if USE_CLASS_WEIGHT:
+        y=train_data[1] # labels for training data
+        weight_for_0, weight_for_1 = calculate_class_weights(y)
+        class_weight = {0: weight_for_0, 1: weight_for_1} # prepare dic for Keras
+
     # Training the model
     history = model.fit(
         x=train_data[0], 
@@ -263,10 +285,11 @@ def objective(trial): # uses effnet
         epochs=EPOCHS,
         validation_data=(val_data[0], val_data[1]),
         verbose=VERBOSITY_LEVEL,
+        class_weight=class_weight,
         #callbacks=[early_stopping,reduce_lr_loss, tensorboard]
         #callbacks=[TFKerasPruningCallback(trial, metric_to_monitor), early_stopping]
         #callbacks=[early_stopping, best_model_save, reduce_lr_loss]
-        callbacks=[early_stopping, best_model_save, reduce_lr_loss, TFKerasPruningCallback(trial, metric_to_monitor[0])]
+        callbacks=[early_stopping, best_model_save, reduce_lr_loss, TFKerasPruningCallback(trial, metric_to_monitor)]
     )
     #CURRENT_MODEL = tf.keras.models.clone_model(model)
 
@@ -307,9 +330,9 @@ def objective(trial): # uses effnet
 
     # Optuna needs to use the same metric for all evaluations (it could be val_accuracy or val_auc but one cannot change it for each trial)
 
-    if metric_to_monitor[0] == 'val_accuracy': #trial.suggest_categorical("metric_to_monitor", ['val_accuracy', 'val_auc']),
+    if metric_to_monitor == 'val_accuracy': #trial.suggest_categorical("metric_to_monitor", ['val_accuracy', 'val_auc']),
         return val_accuracy
-    elif metric_to_monitor[0] == 'val_auc':
+    elif metric_to_monitor == 'val_auc':
         return val_auc
     else:
         raise Exception("Metric must be val_auc or val_accuracy")
@@ -348,7 +371,7 @@ if __name__ == '__main__':
     #study.optimize(objective, n_trials=100)
     pruned_trials = study.get_trials(deepcopy=False, states=[optuna.trial.TrialState.PRUNED])
     complete_trials = study.get_trials(deepcopy=False, states=[optuna.trial.TrialState.COMPLETE])    
-    study.optimize(objective, n_trials=250) #, callbacks=[save_best_model_callback]) #, timeout=600)
+    study.optimize(objective, n_trials=NUM_OPTUNA_TRIALS) #, callbacks=[save_best_model_callback]) #, timeout=600)
 
     print("Number of finished trials: {}".format(len(study.trials)))
 
